@@ -1,16 +1,13 @@
 // ChatBox.jsx
 
-import React, { useEffect, useState, useContext } from "react";
+import React, { useEffect, useState, useContext, useRef } from "react";
 import { userDataContext } from "../../context/UserContext";
 import { authDataContext } from "../../context/AuthContext";
 import { io } from "socket.io-client";
 import { useConnections } from "../../hooks/useConnections";
 import dp from "../../assets/dp.webp";
 import axios from "axios";
-
-const socket = io("http://localhost:8000", {
-  withCredentials: true,
-});
+import { FiPhone, FiVideo, FiMic, FiMicOff, FiCamera, FiCameraOff, FiPhoneOff } from "react-icons/fi";
 
 
 
@@ -21,19 +18,110 @@ function ChatBox() {
   const [receiverObj, setReceiverObj] = useState(null);
   const [message, setMessage] = useState("");
   const [chat, setChat] = useState([]);
+  const listRef = useRef(null);
+  const [isTyping, setIsTyping] = useState(false);
+  const [peerTyping, setPeerTyping] = useState(false);
   const connections = useConnections();
+  const socketRef = useRef(null);
+
+  // WebRTC state
+  const pcRef = useRef(null);
+  const localVideoRef = useRef(null);
+  const remoteVideoRef = useRef(null);
+  const localStreamRef = useRef(null);
+  const remoteStreamRef = useRef(null);
+  const [inCall, setInCall] = useState(false);
+  const [callType, setCallType] = useState(null); // 'audio' | 'video'
+  const [incomingCall, setIncomingCall] = useState(null); // { from, offer, callType }
+  const [muted, setMuted] = useState(false);
+  const [cameraOff, setCameraOff] = useState(false);
 
   // Fetch chat history when receiverId changes
   useEffect(() => {
-    if (!userData?._id) return;
-    socket.emit("register", userData._id);
-    socket.on("receive_message", (data) => {
-      setChat((prev) => [...prev, { ...data, incoming: true }]);
-    });
-    return () => {
-      socket.off("receive_message");
+    if (!userData?._id || !serverUrl) return;
+    // initialize socket once
+    if (!socketRef.current) {
+      socketRef.current = io(serverUrl, { withCredentials: true });
+      socketRef.current.emit("register", userData._id);
+    }
+    const socket = socketRef.current;
+    const onReceive = (data) => {
+      setChat((prev) => [
+        ...prev,
+        { ...data, incoming: true, status: "delivered" }
+      ]);
+      // Inform server messages are seen if this chat is active and scrolled near bottom
+      markReadIfVisible();
     };
-  }, [userData]);
+    const onStatus = ({ clientId, messageId, delivered }) => {
+      if (!clientId) return;
+      setChat((prev) => prev.map(m => m.clientId === clientId ? { ...m, messageId, status: delivered ? "delivered" : "sent" } : m));
+    };
+    const onTyping = ({ from, isTyping }) => {
+      if (from === receiverId) setPeerTyping(isTyping);
+    };
+    const onRead = ({ peerId }) => {
+      if (peerId === receiverId) {
+        setChat(prev => prev.map(m => (m.incoming ? m : { ...m, status: "read" })));
+      }
+    };
+
+    // Call signaling handlers
+    const onIncomingCall = ({ from, offer, callType }) => {
+      setIncomingCall({ from, offer, callType });
+    };
+    const onCallAnswer = async ({ from, answer }) => {
+      try {
+        if (pcRef.current) {
+          await pcRef.current.setRemoteDescription(new RTCSessionDescription(answer));
+          setInCall(true);
+        }
+      } catch (e) { console.error(e); }
+    };
+    const onIceCandidate = async ({ from, candidate }) => {
+      try {
+        if (pcRef.current && candidate) {
+          await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+        }
+      } catch (e) { console.error(e); }
+    };
+    const onCallEnded = () => {
+      endCall(false);
+    };
+    const onCallRejected = () => {
+      cleanupCall();
+      setInCall(false);
+      setCallType(null);
+    };
+    const onCallUnavailable = () => {
+      // peer offline
+      alert("User is unavailable for call");
+      cleanupCall();
+    };
+
+    socket.on("receive_message", onReceive);
+    socket.on("message_status", onStatus);
+    socket.on("typing", onTyping);
+    socket.on("messages_read", onRead);
+    socket.on("incoming_call", onIncomingCall);
+    socket.on("call_answer", onCallAnswer);
+    socket.on("ice_candidate", onIceCandidate);
+    socket.on("call_ended", onCallEnded);
+    socket.on("call_rejected", onCallRejected);
+    socket.on("call_unavailable", onCallUnavailable);
+    return () => {
+      socket.off("receive_message", onReceive);
+      socket.off("message_status", onStatus);
+      socket.off("typing", onTyping);
+      socket.off("messages_read", onRead);
+      socket.off("incoming_call", onIncomingCall);
+      socket.off("call_answer", onCallAnswer);
+      socket.off("ice_candidate", onIceCandidate);
+      socket.off("call_ended", onCallEnded);
+      socket.off("call_rejected", onCallRejected);
+      socket.off("call_unavailable", onCallUnavailable);
+    };
+  }, [userData, serverUrl, receiverId]);
 
   useEffect(() => {
     const fetchHistory = async () => {
@@ -43,11 +131,18 @@ function ChatBox() {
           withCredentials: true,
         });
         // Mark messages as incoming or outgoing
-        const items = (res.data.items || []).map(msg => ({
+        const rawItems = res.data.items || [];
+        const items = rawItems.map(msg => ({
           ...msg,
+          text: msg.text,
           incoming: msg.from !== userData._id,
+          clientId: undefined,
+          messageId: msg._id,
+          status: msg.readAt ? "read" : (msg.deliveredAt ? "delivered" : (msg.from === userData._id ? "sent" : undefined))
         }));
         setChat(items);
+        // After loading, mark as read for peer's messages
+        markRead();
       } catch (err) {
         setChat([]);
       }
@@ -55,18 +150,168 @@ function ChatBox() {
     fetchHistory();
   }, [receiverId, userData, serverUrl]);
 
+  const markRead = () => {
+    if (!userData?._id || !receiverId) return;
+    socketRef.current?.emit("mark_read", { from: receiverId, to: userData._id });
+  };
+
+  const markReadIfVisible = () => {
+    const el = listRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    if (nearBottom) markRead();
+  };
+
   const sendMessage = () => {
     if (!receiverId || !message.trim() || !userData?._id) return;
+    const cid = Date.now().toString();
     setChat((prev) => [
       ...prev,
-      { senderId: userData._id, text: message, incoming: false },
+      { senderId: userData._id, text: message, incoming: false, clientId: cid, status: "sent" },
     ]);
-    socket.emit("send_message", {
+    socketRef.current?.emit("send_message", {
       senderId: userData._id,
       receiverId,
       text: message,
+      clientId: cid,
     });
     setMessage("");
+    // Inform peer not typing
+    socketRef.current?.emit("typing", { from: userData._id, to: receiverId, isTyping: false });
+  };
+
+  // typing events
+  useEffect(() => {
+    if (!userData?._id || !receiverId) return;
+    if (message && !isTyping) {
+      setIsTyping(true);
+      socketRef.current?.emit("typing", { from: userData._id, to: receiverId, isTyping: true });
+    }
+    const t = setTimeout(() => {
+      if (isTyping) {
+        setIsTyping(false);
+        socketRef.current?.emit("typing", { from: userData._id, to: receiverId, isTyping: false });
+      }
+    }, 800);
+    return () => clearTimeout(t);
+  }, [message, userData, receiverId]);
+
+  // Helper: create peer connection
+  const createPeerConnection = () => {
+    const pc = new RTCPeerConnection({
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:global.stun.twilio.com:3478?transport=udp" }
+      ]
+    });
+    pc.onicecandidate = (e) => {
+      if (e.candidate && receiverId) {
+        socketRef.current?.emit("ice_candidate", { to: receiverId, from: userData._id, candidate: e.candidate });
+      }
+    };
+    pc.ontrack = (e) => {
+      if (!remoteStreamRef.current) {
+        remoteStreamRef.current = new MediaStream();
+      }
+      e.streams[0]?.getTracks().forEach(t => remoteStreamRef.current.addTrack(t));
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = e.streams[0];
+      }
+    };
+    return pc;
+  };
+
+  const getMedia = async (type) => {
+    const constraints = type === 'video' ? { video: true, audio: true } : { audio: true };
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    localStreamRef.current = stream;
+    if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+    return stream;
+  };
+
+  const startCall = async (type) => {
+    if (!receiverId || !userData?._id) return;
+    try {
+      setCallType(type);
+      const stream = await getMedia(type);
+      const pc = createPeerConnection();
+      pcRef.current = pc;
+      stream.getTracks().forEach(track => pc.addTrack(track, stream));
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socketRef.current?.emit("call_user", { to: receiverId, from: userData._id, offer, callType: type });
+    } catch (e) {
+      alert("Unable to start call");
+      cleanupCall();
+    }
+  };
+
+  const acceptCall = async () => {
+    if (!incomingCall) return;
+    const { from, offer, callType: t } = incomingCall;
+    try {
+      setCallType(t);
+      const stream = await getMedia(t);
+      const pc = createPeerConnection();
+      pcRef.current = pc;
+      stream.getTracks().forEach(track => pc.addTrack(track, stream));
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      socketRef.current?.emit("answer_call", { to: from, from: userData._id, answer });
+      setInCall(true);
+      setIncomingCall(null);
+    } catch (e) {
+      alert("Failed to accept call");
+      cleanupCall();
+    }
+  };
+
+  const rejectCall = () => {
+    if (!incomingCall) return;
+    socketRef.current?.emit("reject_call", { to: incomingCall.from, from: userData._id });
+    setIncomingCall(null);
+    cleanupCall();
+  };
+
+  const endCall = (notifyPeer = true) => {
+    try {
+      if (notifyPeer && receiverId) {
+        socketRef.current?.emit("end_call", { to: receiverId, from: userData._id });
+      }
+    } catch {}
+    cleanupCall();
+    setInCall(false);
+    setCallType(null);
+  };
+
+  const cleanupCall = () => {
+    try {
+      pcRef.current?.getSenders()?.forEach(s => { try { s.track?.stop?.(); } catch {} });
+      pcRef.current?.close?.();
+    } catch {}
+    pcRef.current = null;
+    localStreamRef.current?.getTracks()?.forEach(t => t.stop());
+    localStreamRef.current = null;
+    remoteStreamRef.current = null;
+    if (localVideoRef.current) localVideoRef.current.srcObject = null;
+    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    setMuted(false);
+    setCameraOff(false);
+  };
+
+  const toggleMute = () => {
+    const stream = localStreamRef.current;
+    if (!stream) return;
+    stream.getAudioTracks().forEach(t => (t.enabled = !t.enabled));
+    setMuted(prev => !prev);
+  };
+
+  const toggleCamera = () => {
+    const stream = localStreamRef.current;
+    if (!stream) return;
+    stream.getVideoTracks().forEach(t => (t.enabled = !t.enabled));
+    setCameraOff(prev => !prev);
   };
 
   // No registration step needed, always show chat UI if logged in
@@ -81,14 +326,35 @@ function ChatBox() {
   }
 
   return (
+    <>
     <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-[#1A1F71] to-[#2C2C2C] px-2 py-4">
       <div className="bg-white w-full max-w-md h-[80vh] max-h-[700px] rounded-lg shadow-md flex flex-col p-2 sm:p-4 mt-4 sm:mt-[100px]">
         {/* Chat Header */}
-  <div className="flex items-center gap-2 sm:gap-3 mb-3 sm:mb-4 justify-center">
+  <div className="flex items-center gap-2 sm:gap-3 mb-3 sm:mb-4 justify-between">
           {receiverObj ? (
             <>
-              <img src={receiverObj.profileImage || dp} alt="" className="w-9 h-9 rounded-full border" />
-              <span className="text-lg font-semibold text-gray-800">{receiverObj.firstName} {receiverObj.lastName}</span>
+              <div className="flex items-center gap-2">
+                <img src={receiverObj.profileImage || dp} alt="" className="w-9 h-9 rounded-full border" />
+                <span className="text-lg font-semibold text-gray-800">{receiverObj.firstName} {receiverObj.lastName}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  className="p-2 rounded-full bg-blue-50 hover:bg-blue-100 text-blue-600 disabled:opacity-50"
+                  disabled={!receiverId || inCall}
+                  title="Voice call"
+                  onClick={() => startCall('audio')}
+                >
+                  <FiPhone />
+                </button>
+                <button
+                  className="p-2 rounded-full bg-blue-50 hover:bg-blue-100 text-blue-600 disabled:opacity-50"
+                  disabled={!receiverId || inCall}
+                  title="Video call"
+                  onClick={() => startCall('video')}
+                >
+                  <FiVideo />
+                </button>
+              </div>
             </>
           ) : (
             <span className="text-lg font-semibold text-gray-800">Real-Time Chat</span>
@@ -124,6 +390,8 @@ function ChatBox() {
         )}
         {/* Chat Messages */}
         <div
+          ref={listRef}
+          onScroll={markReadIfVisible}
           className="flex-1 overflow-y-auto border border-gray-300 rounded p-1 sm:p-2 mb-2 sm:mb-3 bg-gray-50 scrollbar-hide"
           style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
         >
@@ -133,11 +401,18 @@ function ChatBox() {
               key={index}
               className={`flex ${msg.incoming ? "justify-start" : "justify-end"} mb-1 sm:mb-2`}
             >
-              <span
-                className={`px-2 sm:px-3 py-1 sm:py-2 rounded-lg text-xs sm:text-sm ${msg.incoming ? "bg-gray-300 text-black" : "bg-blue-500 text-white"}`}
-              >
-                {msg.text}
-              </span>
+              <div className={`max-w-[80%] ${msg.incoming ? "text-left" : "text-right"}`}>
+                <span
+                  className={`inline-block px-2 sm:px-3 py-1 sm:py-2 rounded-lg text-xs sm:text-sm ${msg.incoming ? "bg-gray-300 text-black" : "bg-blue-500 text-white"}`}
+                >
+                  {msg.text}
+                </span>
+                {!msg.incoming && (
+                  <div className="mt-0.5 text-[10px] text-gray-500">
+                    {msg.status === "read" ? "✔✔ Read" : msg.status === "delivered" ? "✔✔ Delivered" : "✔ Sent"}
+                  </div>
+                )}
+              </div>
             </div>
           ))}
         </div>
@@ -157,8 +432,52 @@ function ChatBox() {
             Send
           </button>
         </div>
+        {peerTyping && (
+          <div className="text-xs text-gray-500 mt-1">Typing…</div>
+        )}
       </div>
-    </div>
+  </div>
+  {/* Incoming call modal */}
+    {incomingCall && (
+      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+        <div className="bg-white rounded-lg p-4 w-80 text-gray-800">
+          <div className="font-semibold mb-2">Incoming {incomingCall.callType === 'video' ? 'Video' : 'Voice'} Call</div>
+          <div className="text-sm mb-4">From: {incomingCall.from === receiverId ? `${receiverObj?.firstName} ${receiverObj?.lastName}` : 'Unknown'}</div>
+          <div className="flex justify-end gap-2">
+            <button className="px-3 py-1 rounded bg-gray-200" onClick={rejectCall}>Reject</button>
+            <button className="px-3 py-1 rounded bg-blue-600 text-white" onClick={acceptCall}>Accept</button>
+          </div>
+        </div>
+      </div>
+  )}
+  {/* Ongoing call overlay */}
+    {inCall && (
+      <div className="fixed bottom-4 right-4 bg-white rounded-lg shadow-lg p-2 z-40 w-72 text-gray-800">
+        <div className="text-xs font-semibold mb-1">{callType === 'video' ? 'Video' : 'Voice'} call in progress</div>
+        {callType === 'video' ? (
+          <div className="relative w-full aspect-video bg-black rounded overflow-hidden">
+            <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
+            <video ref={localVideoRef} autoPlay muted playsInline className="w-24 h-16 object-cover absolute bottom-1 right-1 border-2 border-white rounded" />
+          </div>
+        ) : (
+          <div className="p-3 text-center text-sm">Connected with {receiverObj?.firstName} {receiverObj?.lastName}</div>
+        )}
+        <div className="flex items-center justify-center gap-3 mt-2">
+          <button onClick={toggleMute} className="p-2 rounded-full bg-gray-100 hover:bg-gray-200" title={muted ? 'Unmute' : 'Mute'}>
+            {muted ? <FiMicOff /> : <FiMic />}
+          </button>
+          {callType === 'video' && (
+            <button onClick={toggleCamera} className="p-2 rounded-full bg-gray-100 hover:bg-gray-200" title={cameraOff ? 'Camera on' : 'Camera off'}>
+              {cameraOff ? <FiCameraOff /> : <FiCamera />}
+            </button>
+          )}
+          <button onClick={() => endCall(true)} className="p-2 rounded-full bg-red-500 text-white hover:bg-red-600" title="End call">
+            <FiPhoneOff />
+          </button>
+        </div>
+      </div>
+    )}
+    </>
   );
 }
 

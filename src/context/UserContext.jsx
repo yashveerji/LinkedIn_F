@@ -1,7 +1,8 @@
-import React, { createContext, useContext, useEffect, useState } from 'react'
+import React, { createContext, useContext, useEffect, useRef, useState } from 'react'
 import { authDataContext } from './AuthContext'
 import axios from 'axios'
 import { useNavigate } from 'react-router-dom'
+import { makeSocket } from '../services/socket'
 export const userDataContext=createContext()
 
 function UserContext({children}) {
@@ -11,6 +12,7 @@ let [edit,setEdit]=useState(false)
 let [postData,setPostData]=useState([])
 let [profileData,setProfileData]=useState([])
 let navigate=useNavigate()
+const socketRef = useRef(null)
 const getCurrentUser=async ()=>{
     try {
         let result=await axios.get(serverUrl+"/api/user/currentuser",{withCredentials:true})
@@ -27,9 +29,9 @@ const getPost=async ()=>{
     let result=await axios.get(serverUrl+"/api/post/getpost",{
       withCredentials:true
     })
-    console.log(result)
-    setPostData(result.data)
-   
+    const data = result.data;
+    const items = Array.isArray(data) ? data : (data?.items || []);
+    setPostData(items)
   } catch (error) {
     console.log(error)
   }
@@ -54,10 +56,78 @@ getCurrentUser();
  getPost()
 }, []);
 
+// App-wide realtime feed updates
+useEffect(() => {
+  // require server url
+  if (!serverUrl) return;
+  // avoid multiple sockets
+  if (socketRef.current?.socket?.connected) return;
+  const { socket, register } = makeSocket(serverUrl, userData?._id);
+  socketRef.current = { socket, register };
+  if (userData?._id) register(userData._id);
 
-    const value={
-        userData,setUserData,edit,setEdit,postData,setPostData,getPost,handleGetProfile,profileData,setProfileData
-    }
+  const onPostCreated = (post) => {
+    if (!post || !post._id) return;
+    setPostData(prev => {
+      const exists = prev.some(p => (p._id || p.id) === post._id);
+      return exists ? prev : [post, ...prev];
+    });
+  };
+  const onPostDeleted = ({ postId }) => {
+    if (!postId) return;
+    setPostData(prev => prev.filter(p => (p._id || p.id) !== postId));
+  };
+  const onLikeUpdated = ({ postId, reactions }) => {
+    if (!postId) return;
+    setPostData(prev => prev.map(p => ((p._id || p.id) === postId ? { ...p, reactions: reactions || [] } : p)));
+  };
+  const onCommentAdded = ({ postId, comm }) => {
+    if (!postId) return;
+    setPostData(prev => prev.map(p => ((p._id || p.id) === postId ? { ...p, comment: comm || [] } : p)));
+  };
+  const onCommentDeleted = ({ postId, commentId }) => {
+    if (!postId || !commentId) return;
+    setPostData(prev => prev.map(p => {
+      if ((p._id || p.id) !== postId) return p;
+      const list = Array.isArray(p.comment) ? p.comment.filter(c => (c._id || c.id) !== commentId) : [];
+      return { ...p, comment: list };
+    }));
+  };
+
+  socket.on('postCreated', onPostCreated);
+  socket.on('postDeleted', onPostDeleted);
+  socket.on('likeUpdated', onLikeUpdated);
+  socket.on('commentAdded', onCommentAdded);
+  socket.on('commentDeleted', onCommentDeleted);
+
+  return () => {
+    socket.off('postCreated', onPostCreated);
+    socket.off('postDeleted', onPostDeleted);
+    socket.off('likeUpdated', onLikeUpdated);
+    socket.off('commentAdded', onCommentAdded);
+    socket.off('commentDeleted', onCommentDeleted);
+    try { socket.disconnect(); } catch {}
+    socketRef.current = null;
+  };
+// rebind when user id becomes available
+// eslint-disable-next-line react-hooks/exhaustive-deps
+}, [serverUrl, userData?._id]);
+
+
+  const value={
+    userData,
+    setUserData,
+    edit,
+    setEdit,
+    postData,
+    setPostData,
+    getPost,
+    handleGetProfile,
+    profileData,
+    setProfileData,
+    // expose app-wide socket (may be null before init)
+    socket: socketRef.current?.socket
+  }
   return (
     <userDataContext.Provider value={value}>
       {children}

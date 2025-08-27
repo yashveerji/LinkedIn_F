@@ -103,8 +103,8 @@ function Login() {
         <img src={logo} alt="Logo" className="h-[150px] object-contain" />
       </div>
 
-      {/* Login Form */}
-      <form
+  {/* Login Form */}
+  <form
         className="w-[90%] max-w-[400px] bg-white shadow-lg rounded-xl px-6 py-8 flex flex-col gap-4"
         onSubmit={handleSignIn}
       >
@@ -152,6 +152,16 @@ function Login() {
         >
           {loading ? "Loading..." : "Sign In"}
         </button>
+
+        {/* Forgot Password link */}
+        <div className="text-center">
+          <span
+            className="text-sm text-gray-700 hover:underline cursor-pointer"
+            onClick={() => navigate('/forgot-password')}
+          >
+            Forgot password?
+          </span>
+        </div>
 
         {/* Sign Up Link */}
         <p className="text-center text-gray-600 mt-4">

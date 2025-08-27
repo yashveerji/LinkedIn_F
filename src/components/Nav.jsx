@@ -13,6 +13,7 @@ import axios from 'axios';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { IoChatbubbleEllipsesSharp } from "react-icons/io5";
 import { MdWork } from "react-icons/md";
+import { BsBookmarkHeartFill } from 'react-icons/bs';
 
 function Nav() {
     const [activeSearch, setActiveSearch] = useState(false)
@@ -169,6 +170,14 @@ function Nav() {
                     >
                         <IoNotificationsSharp className='w-[23px] h-[23px] mb-1' />
                         <span className='hidden md:block'>Notifications</span>
+                    </button>
+                    <button
+                        className={`flex flex-col items-center cursor-pointer rounded-full px-4 py-2 font-semibold text-base transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-indigo-400 ${isActive("/saved") ? "bg-indigo-500 text-white shadow-lg" : "text-gray-700 dark:text-gray-200 hover:bg-indigo-100 dark:hover:bg-indigo-900"}`}
+                        onClick={() => navigate('/saved')}
+                        aria-label="Saved"
+                    >
+                        <BsBookmarkHeartFill className='w-[23px] h-[23px] mb-1' />
+                        <span className='hidden md:block'>Saved</span>
                     </button>
                     {/* Dark/Light Mode Toggle */}
                     <button

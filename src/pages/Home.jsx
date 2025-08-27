@@ -12,7 +12,7 @@ import AIChat from "../components/AIChat";
 
 
 function Home() {
-  const { userData, edit, setEdit, postData, getPost, handleGetProfile } = useContext(userDataContext);
+  const { userData, edit, setEdit, postData, setPostData, getPost, handleGetProfile } = useContext(userDataContext);
   const { serverUrl } = useContext(authDataContext);
   const [frontendImage, setFrontendImage] = useState("");
   const [backendImage, setBackendImage] = useState("");
@@ -22,6 +22,10 @@ function Home() {
   const [suggestedUser, setSuggestedUser] = useState([]);
   const [toast, setToast] = useState("");
   const image = useRef();
+  const sentinelRef = useRef(null);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
 
   const handleImage = (e) => {
     const file = e.target.files[0];
@@ -65,6 +69,60 @@ function Home() {
   useEffect(() => {
     getPost();
   }, [uploadPost]);
+
+  // initial paged load
+  useEffect(() => {
+    let cancelled = false;
+    const loadFirstPage = async () => {
+      try {
+        const res = await axios.get(`${serverUrl}/api/post/getpost?page=1&limit=10`, { withCredentials: true });
+        const data = res.data;
+        const items = Array.isArray(data) ? data : (data.items || []);
+        if (!cancelled) {
+          setPostData(items);
+          setPage(1);
+          setHasMore(Boolean(!Array.isArray(data) && data.hasMore));
+        }
+      } catch (e) {
+        // fallback to context fetch already called
+      }
+    };
+    loadFirstPage();
+    return () => { cancelled = true; };
+  }, [serverUrl, setPostData]);
+
+  // infinite scroll observer
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver((entries) => {
+      const entry = entries[0];
+      if (entry.isIntersecting) {
+        loadMore();
+      }
+    }, { root: null, rootMargin: '200px', threshold: 0 });
+    observer.observe(el);
+    return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sentinelRef.current, hasMore, page]);
+
+  const loadMore = async () => {
+    if (!hasMore || isLoadingMore) return;
+    setIsLoadingMore(true);
+    try {
+      const nextPage = page + 1;
+      const res = await axios.get(`${serverUrl}/api/post/getpost?page=${nextPage}&limit=10`, { withCredentials: true });
+      const data = res.data;
+      const items = Array.isArray(data) ? data : (data.items || []);
+      setPostData(prev => [...prev, ...items]);
+      setPage(nextPage);
+      setHasMore(Boolean(!Array.isArray(data) && data.hasMore));
+    } catch (e) {
+      // ignore
+    } finally {
+      setIsLoadingMore(false);
+    }
+  };
 
     return (
     <div className="w-full min-h-screen bg-gradient-to-br from-[#1A1F71] to-[#2C2C2C] dark:from-[#181824] dark:to-[#23243a] flex flex-col lg:flex-row p-5 gap-5 relative text-white dark:text-yellow-100">
@@ -137,17 +195,24 @@ function Home() {
         </button>
 
         {/* Posts */}
-        {postData.map((post, index) => (
+  {postData.map((post, index) => (
           <div key={index} className="card dark:bg-[#181824] dark:border-yellow-700">
             <Post {...post} onDelete={() => {
               setToast("Post deleted successfully");
               setTimeout(() => {
                 setToast("");
-                getPost();
+    // Reload first page after delete for consistency
+    setPage(1);
+    setHasMore(true);
+    setPostData(prev => prev.filter(p => p._id !== post._id));
               }, 1500);
             }} />
           </div>
         ))}
+  <div ref={sentinelRef} className="h-6"></div>
+  {isLoadingMore && (
+    <div className="text-center text-yellow-200 dark:text-yellow-300">Loading more...</div>
+  )}
       {/* Toast notification */}
       {toast && (
   <div className="fixed top-5 left-1/2 -translate-x-1/2 bg-green-500 dark:bg-green-700 text-white px-6 py-2 rounded shadow-lg z-50 animate-fadeIn">

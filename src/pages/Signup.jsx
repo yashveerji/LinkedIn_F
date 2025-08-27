@@ -90,6 +90,10 @@ function Signup() {
   let [password, setPassword] = useState("");
   let [loading, setLoading] = useState(false);
   let [err, setErr] = useState("");
+  // OTP state
+  const [otpStep, setOtpStep] = useState(false);
+  const [otp, setOtp] = useState("");
+  const [pendingUserId, setPendingUserId] = useState("");
 
   const handleSignUp = async (e) => {
     e.preventDefault();
@@ -100,18 +104,60 @@ function Signup() {
         { firstName, lastName, userName, email, password },
         { withCredentials: true }
       );
-      console.log(result);
-      setUserData(result.data);
-      navigate("/");
+      // Expecting { message, userId }
+      setPendingUserId(result.data.userId);
+      setOtpStep(true);
       setErr("");
       setLoading(false);
+    } catch (error) {
+      setErr(error.response?.data?.message || "Something went wrong");
+      setLoading(false);
+    }
+  };
+
+  const handleVerifyOtp = async (e) => {
+    e.preventDefault();
+    if (!otp || !pendingUserId) return;
+    setLoading(true);
+    try {
+      const res = await axios.post(
+        serverUrl + "/api/auth/verify-otp",
+        { userId: pendingUserId, otp },
+        { withCredentials: true }
+      );
+      // Success: user is now logged in via httpOnly cookie
+      setUserData(res.data);
+      // Reset form state
       setFirstName("");
       setLastName("");
       setEmail("");
       setPassword("");
       setUserName("");
+      setOtp("");
+      setPendingUserId("");
+      setOtpStep(false);
+      setErr("");
+      navigate("/");
     } catch (error) {
-      setErr(error.response?.data?.message || "Something went wrong");
+      setErr(error.response?.data?.message || "OTP verification failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResendOtp = async () => {
+    if (!pendingUserId) return;
+    setLoading(true);
+    setErr("");
+    try {
+      await axios.post(
+        serverUrl + "/api/auth/resend-otp",
+        { userId: pendingUserId },
+        { withCredentials: true }
+      );
+    } catch (error) {
+      setErr(error.response?.data?.message || "Failed to resend OTP");
+    } finally {
       setLoading(false);
     }
   };
@@ -123,11 +169,12 @@ function Signup() {
         <img src={logo} alt="Logo" className="h-[100px] object-contain" />
       </div>
 
-      {/* Signup Form */}
-      <form
-        className="w-[90%] max-w-[400px] bg-white shadow-lg rounded-xl px-6 py-8 flex flex-col gap-4"
-        onSubmit={handleSignUp}
-      >
+      {/* Signup Form or OTP Form */}
+      {!otpStep ? (
+        <form
+          className="w-[90%] max-w-[400px] bg-white shadow-lg rounded-xl px-6 py-8 flex flex-col gap-4"
+          onSubmit={handleSignUp}
+        >
         <h1 className="text-gray-800 text-3xl font-bold mb-4 text-center">Sign Up</h1>
 
         <input
@@ -190,23 +237,72 @@ function Signup() {
           </p>
         )}
 
-        <button
-          className="w-full h-[50px] rounded-full bg-[#24b2ff] hover:bg-[#1d9be0] transition-all text-white font-semibold mt-6 disabled:opacity-60 disabled:cursor-not-allowed"
-          disabled={loading}
-        >
-          {loading ? "Loading..." : "Sign Up"}
-        </button>
-
-        <p className="text-center text-gray-600 mt-4">
-          Already have an account?{" "}
-          <span
-            className="text-[#24b2ff] font-medium cursor-pointer hover:underline"
-            onClick={() => navigate("/login")}
+          <button
+            className="w-full h-[50px] rounded-full bg-[#24b2ff] hover:bg-[#1d9be0] transition-all text-white font-semibold mt-6 disabled:opacity-60 disabled:cursor-not-allowed"
+            disabled={loading}
           >
-            Sign In
-          </span>
-        </p>
-      </form>
+            {loading ? "Sending OTP..." : "Sign Up"}
+          </button>
+
+          <p className="text-center text-gray-600 mt-4">
+            Already have an account?{" "}
+            <span
+              className="text-[#24b2ff] font-medium cursor-pointer hover:underline"
+              onClick={() => navigate("/login")}
+            >
+              Sign In
+            </span>
+          </p>
+        </form>
+      ) : (
+        <form
+          className="w-[90%] max-w-[400px] bg-white shadow-lg rounded-xl px-6 py-8 flex flex-col gap-4"
+          onSubmit={handleVerifyOtp}
+        >
+          <h1 className="text-gray-800 text-2xl font-bold mb-2 text-center">Verify OTP</h1>
+          <p className="text-gray-600 text-sm text-center mb-2">We've sent a 6-digit code to {email}. Enter it below to complete signup.</p>
+          <input
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            maxLength={6}
+            placeholder="Enter 6-digit OTP"
+            className="w-full h-[50px] border border-gray-300 focus:border-[#24b2ff] focus:ring-2 focus:ring-[#24b2ff] outline-none text-gray-800 text-[18px] tracking-widest px-4 rounded-lg text-center"
+            value={otp}
+            onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
+          />
+
+          {err && (
+            <p className="text-center text-red-500 text-sm font-medium mt-1">*{err}</p>
+          )}
+
+          <div className="flex gap-3 mt-2">
+            <button
+              type="button"
+              onClick={() => { setOtpStep(false); setOtp(""); setErr(""); }}
+              className="w-1/3 h-[44px] rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50"
+              disabled={loading}
+            >
+              Back
+            </button>
+            <button
+              className="flex-1 h-[44px] rounded-lg bg-[#24b2ff] hover:bg-[#1d9be0] transition-all text-white font-semibold disabled:opacity-60 disabled:cursor-not-allowed"
+              disabled={loading || otp.length !== 6}
+            >
+              {loading ? "Verifying..." : "Verify"}
+            </button>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleResendOtp}
+            className="mt-3 h-[44px] rounded-lg border border-[#24b2ff] text-[#24b2ff] hover:bg-[#e9f6fe]"
+            disabled={loading}
+          >
+            Resend OTP
+          </button>
+        </form>
+      )}
     </div>
   );
 }
