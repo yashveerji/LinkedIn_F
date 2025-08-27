@@ -194,12 +194,21 @@ function ChatBox() {
 
   // Helper: create peer connection
   const createPeerConnection = (targetId) => {
-    const pc = new RTCPeerConnection({
-      iceServers: [
-        { urls: "stun:stun.l.google.com:19302" },
-        { urls: "stun:global.stun.twilio.com:3478?transport=udp" }
-      ]
-    });
+    const iceServers = [
+      { urls: [
+        "stun:stun.l.google.com:19302",
+        "stun:stun1.l.google.com:19302",
+        "stun:stun2.l.google.com:19302"
+      ]}
+    ];
+    // Optional TURN from env (comma-separated URLs)
+    const turnUrls = import.meta.env.VITE_TURN_URL;
+    const turnUser = import.meta.env.VITE_TURN_USERNAME;
+    const turnCred = import.meta.env.VITE_TURN_CREDENTIAL;
+    if (turnUrls && turnUser && turnCred) {
+      iceServers.push({ urls: turnUrls.split(","), username: turnUser, credential: turnCred });
+    }
+    const pc = new RTCPeerConnection({ iceServers });
     pc.onicecandidate = (e) => {
       if (e.candidate && targetId) {
         socket?.emit("ice_candidate", { to: targetId, from: userData._id, candidate: e.candidate });
