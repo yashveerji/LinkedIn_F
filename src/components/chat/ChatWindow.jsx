@@ -3,16 +3,14 @@
 import React, { useEffect, useState, useContext, useRef } from "react";
 import { userDataContext } from "../../context/UserContext";
 import { authDataContext } from "../../context/AuthContext";
-// socket is provided by UserContext
 import { useConnections } from "../../hooks/useConnections";
 import dp from "../../assets/dp.webp";
 import axios from "axios";
-import { FiPhone, FiVideo, FiMic, FiMicOff, FiCamera, FiCameraOff, FiPhoneOff } from "react-icons/fi";
-
-
+import { FiPhone, FiVideo } from "react-icons/fi";
+import CallWindow from "./CallWindow";
 
 function ChatBox() {
-  const { userData } = useContext(userDataContext);
+  const { userData, socket } = useContext(userDataContext);
   const { serverUrl } = useContext(authDataContext);
   const [receiverId, setReceiverId] = useState("");
   const [receiverObj, setReceiverObj] = useState(null);
@@ -22,7 +20,6 @@ function ChatBox() {
   const [isTyping, setIsTyping] = useState(false);
   const [peerTyping, setPeerTyping] = useState(false);
   const connections = useConnections();
-  const { socket } = useContext(userDataContext);
 
   // WebRTC state
   const pcRef = useRef(null);
@@ -36,17 +33,19 @@ function ChatBox() {
   const [callPeerId, setCallPeerId] = useState(null);
   const [muted, setMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
+  const [minimized, setMinimized] = useState(false);
   const [callError, setCallError] = useState("");
 
-  // Fetch chat history when receiverId changes
+  // Socket listeners
   useEffect(() => {
     if (!userData?._id || !socket) return;
+
     const onReceive = (data) => {
+      if (data?.from && receiverId && data.from !== receiverId) return;
       setChat((prev) => [
         ...prev,
         { ...data, incoming: true, status: "delivered" }
       ]);
-      // Inform server messages are seen if this chat is active and scrolled near bottom
       markReadIfVisible();
     };
     const onStatus = ({ clientId, messageId, delivered }) => {
@@ -62,7 +61,6 @@ function ChatBox() {
       }
     };
 
-    // Call signaling handlers
     const onIncomingCall = ({ from, offer, callType }) => {
       setIncomingCall({ from, offer, callType });
     };
@@ -85,13 +83,9 @@ function ChatBox() {
       endCall(false);
     };
     const onCallRejected = () => {
-      cleanupCall();
+      setIncomingCall(null);
       setInCall(false);
-      setCallType(null);
-    };
-    const onCallUnavailable = () => {
-      // peer offline
-      alert("User is unavailable for call");
+      setCallError("Call rejected");
       cleanupCall();
     };
 
@@ -99,34 +93,33 @@ function ChatBox() {
     socket.on("message_status", onStatus);
     socket.on("typing", onTyping);
     socket.on("messages_read", onRead);
+
     socket.on("incoming_call", onIncomingCall);
     socket.on("call_answer", onCallAnswer);
     socket.on("ice_candidate", onIceCandidate);
     socket.on("call_ended", onCallEnded);
     socket.on("call_rejected", onCallRejected);
-    socket.on("call_unavailable", onCallUnavailable);
+
     return () => {
       socket.off("receive_message", onReceive);
       socket.off("message_status", onStatus);
       socket.off("typing", onTyping);
       socket.off("messages_read", onRead);
+
       socket.off("incoming_call", onIncomingCall);
       socket.off("call_answer", onCallAnswer);
       socket.off("ice_candidate", onIceCandidate);
       socket.off("call_ended", onCallEnded);
       socket.off("call_rejected", onCallRejected);
-      socket.off("call_unavailable", onCallUnavailable);
     };
-  }, [userData, socket, receiverId]);
+  }, [socket, userData?._id, receiverId]);
 
+  // Fetch chat history whenever receiver changes
   useEffect(() => {
     const fetchHistory = async () => {
-      if (!userData?._id || !receiverId) return;
+      if (!userData?._id || !receiverId || !serverUrl) return;
       try {
-        const res = await axios.get(`${serverUrl}/api/chat/history/${receiverId}`, {
-          withCredentials: true,
-        });
-        // Mark messages as incoming or outgoing
+        const res = await axios.get(`${serverUrl}/api/chat/history/${receiverId}?page=1&limit=30`, { withCredentials: true });
         const rawItems = res.data.items || [];
         const items = rawItems.map(msg => ({
           ...msg,
@@ -137,18 +130,20 @@ function ChatBox() {
           status: msg.readAt ? "read" : (msg.deliveredAt ? "delivered" : (msg.from === userData._id ? "sent" : undefined))
         }));
         setChat(items);
-        // After loading, mark as read for peer's messages
         markRead();
+        setTimeout(() => {
+          if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
+        }, 0);
       } catch (err) {
         setChat([]);
       }
     };
     fetchHistory();
-  }, [receiverId, userData, serverUrl]);
+  }, [receiverId, userData?._id, serverUrl]);
 
   const markRead = () => {
     if (!userData?._id || !receiverId) return;
-  socket?.emit("mark_read", { from: receiverId, to: userData._id });
+    socket?.emit("mark_read", { from: receiverId, to: userData._id });
   };
 
   const markReadIfVisible = () => {
@@ -165,15 +160,17 @@ function ChatBox() {
       ...prev,
       { senderId: userData._id, text: message, incoming: false, clientId: cid, status: "sent" },
     ]);
-  socket?.emit("send_message", {
+    socket?.emit("send_message", {
       senderId: userData._id,
       receiverId,
       text: message,
       clientId: cid,
     });
     setMessage("");
-    // Inform peer not typing
-  socket?.emit("typing", { from: userData._id, to: receiverId, isTyping: false });
+    socket?.emit("typing", { from: userData._id, to: receiverId, isTyping: false });
+    setTimeout(() => {
+      if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
+    }, 0);
   };
 
   // typing events
@@ -181,16 +178,16 @@ function ChatBox() {
     if (!userData?._id || !receiverId) return;
     if (message && !isTyping) {
       setIsTyping(true);
-  socket?.emit("typing", { from: userData._id, to: receiverId, isTyping: true });
+      socket?.emit("typing", { from: userData._id, to: receiverId, isTyping: true });
     }
     const t = setTimeout(() => {
       if (isTyping) {
         setIsTyping(false);
-  socket?.emit("typing", { from: userData._id, to: receiverId, isTyping: false });
+        socket?.emit("typing", { from: userData._id, to: receiverId, isTyping: false });
       }
     }, 800);
     return () => clearTimeout(t);
-  }, [message, userData, receiverId]);
+  }, [message, userData?._id, receiverId, isTyping, socket]);
 
   // Helper: create peer connection
   const createPeerConnection = (targetId) => {
@@ -260,20 +257,20 @@ function ChatBox() {
   const startCall = async (type) => {
     if (!receiverId || !userData?._id) return;
     try {
-  setCallError("");
-  await ensureSocketReady();
+      setCallError("");
+      await ensureSocketReady();
       setCallType(type);
-  setCallPeerId(receiverId);
+      setCallPeerId(receiverId);
       const stream = await getMedia(type);
-  const pc = createPeerConnection(receiverId);
+      const pc = createPeerConnection(receiverId);
       pcRef.current = pc;
       stream.getTracks().forEach(track => pc.addTrack(track, stream));
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-  socket?.emit("call_user", { to: receiverId, from: userData._id, offer, callType: type });
+      socket?.emit("call_user", { to: receiverId, from: userData._id, offer, callType: type });
     } catch (e) {
-  console.error("startCall error", e);
-  setCallError(e?.message || "Unable to start call");
+      console.error("startCall error", e);
+      setCallError(e?.message || "Unable to start call");
       cleanupCall();
     }
   };
@@ -283,27 +280,27 @@ function ChatBox() {
     const { from, offer, callType: t } = incomingCall;
     try {
       setCallType(t);
-  setCallPeerId(from);
+      setCallPeerId(from);
       const stream = await getMedia(t);
-  const pc = createPeerConnection(from);
+      const pc = createPeerConnection(from);
       pcRef.current = pc;
       stream.getTracks().forEach(track => pc.addTrack(track, stream));
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-  socket?.emit("answer_call", { to: from, from: userData._id, answer });
+      socket?.emit("answer_call", { to: from, from: userData._id, answer });
       setInCall(true);
       setIncomingCall(null);
     } catch (e) {
-  console.error("acceptCall error", e);
-  setCallError(e?.message || "Failed to accept call");
+      console.error("acceptCall error", e);
+      setCallError(e?.message || "Failed to accept call");
       cleanupCall();
     }
   };
 
   const rejectCall = () => {
     if (!incomingCall) return;
-  socket?.emit("reject_call", { to: incomingCall.from, from: userData._id });
+    socket?.emit("reject_call", { to: incomingCall.from, from: userData._id });
     setIncomingCall(null);
     cleanupCall();
   };
@@ -349,7 +346,6 @@ function ChatBox() {
     setCameraOff(prev => !prev);
   };
 
-  // No registration step needed, always show chat UI if logged in
   if (!userData?._id) {
     return (
       <div className="w-full flex items-center justify-center h-screen bg-gradient-to-br from-[#1A1F71] to-[#2C2C2C]">
@@ -362,159 +358,133 @@ function ChatBox() {
 
   return (
     <>
-    <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-[#1A1F71] to-[#2C2C2C] px-2 py-4">
-      <div className="bg-white w-full max-w-md h-[80vh] max-h-[700px] rounded-lg shadow-md flex flex-col p-2 sm:p-4 mt-4 sm:mt-[100px]">
-        {/* Chat Header */}
-  <div className="flex items-center gap-2 sm:gap-3 mb-3 sm:mb-4 justify-between">
-          {receiverObj ? (
-            <>
-              <div className="flex items-center gap-2">
-                <img src={receiverObj.profileImage || dp} alt="" className="w-9 h-9 rounded-full border" />
-                <span className="text-lg font-semibold text-gray-800">{receiverObj.firstName} {receiverObj.lastName}</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  className="p-2 rounded-full bg-blue-50 hover:bg-blue-100 text-blue-600 disabled:opacity-50"
-                  disabled={!receiverId || inCall}
-                  title="Voice call"
-                  onClick={() => startCall('audio')}
-                >
-                  <FiPhone />
-                </button>
-                <button
-                  className="p-2 rounded-full bg-blue-50 hover:bg-blue-100 text-blue-600 disabled:opacity-50"
-                  disabled={!receiverId || inCall}
-                  title="Video call"
-                  onClick={() => startCall('video')}
-                >
-                  <FiVideo />
-                </button>
-              </div>
-            </>
-          ) : (
-            <span className="text-lg font-semibold text-gray-800">Real-Time Chat</span>
+      <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-[#1A1F71] to-[#2C2C2C] px-2 py-4">
+        <div className="bg-white w-full max-w-md h-[80vh] max-h-[700px] rounded-lg shadow-md flex flex-col p-2 sm:p-4 mt-4 sm:mt-[100px]">
+          <div className="flex items-center gap-2 sm:gap-3 mb-3 sm:mb-4 justify-between">
+            {receiverObj ? (
+              <>
+                <div className="flex items-center gap-2">
+                  <img src={receiverObj.profileImage || dp} alt="" className="w-9 h-9 rounded-full border" />
+                  <span className="text-lg font-semibold text-gray-800">{receiverObj.firstName} {receiverObj.lastName}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    className="p-2 rounded-full bg-blue-50 hover:bg-blue-100 text-blue-600 disabled:opacity-50"
+                    disabled={!receiverId || inCall}
+                    title="Voice call"
+                    onClick={() => startCall('audio')}
+                  >
+                    <FiPhone />
+                  </button>
+                  <button
+                    className="p-2 rounded-full bg-blue-50 hover:bg-blue-100 text-blue-600 disabled:opacity-50"
+                    disabled={!receiverId || inCall}
+                    title="Video call"
+                    onClick={() => startCall('video')}
+                  >
+                    <FiVideo />
+                  </button>
+                </div>
+              </>
+            ) : (
+              <span className="text-lg font-semibold text-gray-800">Real-Time Chat</span>
+            )}
+          </div>
+          {callError && (
+            <div className="mb-2 text-xs text-red-600">{callError}</div>
           )}
-        </div>
-        {callError && (
-          <div className="mb-2 text-xs text-red-600">{callError}</div>
-        )}
-        {/* Connection Suggestions */}
-        {connections.length > 0 && (
-          <div className="mb-2 sm:mb-3">
-            <div className="text-xs sm:text-sm text-gray-700 mb-1">Start chat with:</div>
-            <div className="flex flex-wrap gap-1 sm:gap-2">
-              {connections.map(conn => (
-                <button
-                  key={conn._id}
-                  className={`flex items-center gap-1 sm:gap-2 px-2 py-1 rounded-full border text-xs sm:text-sm ${receiverId === conn._id ? "bg-blue-100 border-blue-400" : "bg-gray-100 border-gray-300"}`}
-                  onClick={() => {
-                    setReceiverId(conn._id);
-                    setReceiverObj(conn);
-                  }}
-                >
-                  <img src={conn.profileImage || dp} alt="" className="w-5 h-5 sm:w-6 sm:h-6 rounded-full" />
-                  <span className="text-xs text-gray-800">{conn.firstName} {conn.lastName}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-        {/* Show selected receiver */}
-        {receiverObj && (
-          <div className="flex items-center gap-1 sm:gap-2 mb-1 sm:mb-2">
-            <img src={receiverObj.profileImage || dp} alt="" className="w-6 h-6 sm:w-7 sm:h-7 rounded-full" />
-            <span className="text-xs sm:text-sm text-gray-700 font-semibold">Chatting with {receiverObj.firstName} {receiverObj.lastName}</span>
-          </div>
-        )}
-        {/* Chat Messages */}
-        <div
-          ref={listRef}
-          onScroll={markReadIfVisible}
-          className="flex-1 overflow-y-auto border border-gray-300 rounded p-1 sm:p-2 mb-2 sm:mb-3 bg-gray-50 scrollbar-hide"
-          style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
-        >
-          <style>{`.scrollbar-hide::-webkit-scrollbar { display: none; }`}</style>
-          {chat.map((msg, index) => (
-            <div
-              key={index}
-              className={`flex ${msg.incoming ? "justify-start" : "justify-end"} mb-1 sm:mb-2`}
-            >
-              <div className={`max-w-[80%] ${msg.incoming ? "text-left" : "text-right"}`}>
-                <span
-                  className={`inline-block px-2 sm:px-3 py-1 sm:py-2 rounded-lg text-xs sm:text-sm ${msg.incoming ? "bg-gray-300 text-black" : "bg-blue-500 text-white"}`}
-                >
-                  {msg.text}
-                </span>
-                {!msg.incoming && (
-                  <div className="mt-0.5 text-[10px] text-gray-500">
-                    {msg.status === "read" ? "✔✔ Read" : msg.status === "delivered" ? "✔✔ Delivered" : "✔ Sent"}
-                  </div>
-                )}
+          {connections.length > 0 && (
+            <div className="mb-2 sm:mb-3">
+              <div className="text-xs sm:text-sm text-gray-700 mb-1">Start chat with:</div>
+              <div className="flex flex-wrap gap-1 sm:gap-2">
+                {connections.map(conn => (
+                  <button
+                    key={conn._id}
+                    className={`flex items-center gap-1 sm:gap-2 px-2 py-1 rounded-full border text-xs sm:text-sm ${receiverId === conn._id ? "bg-blue-100 border-blue-400" : "bg-gray-100 border-gray-300"}`}
+                    onClick={() => {
+                      setReceiverId(conn._id);
+                      setReceiverObj(conn);
+                    }}
+                  >
+                    <img src={conn.profileImage || dp} alt="" className="w-5 h-5 sm:w-6 sm:h-6 rounded-full" />
+                    <span className="text-xs text-gray-800">{conn.firstName} {conn.lastName}</span>
+                  </button>
+                ))}
               </div>
             </div>
-          ))}
-        </div>
-        {/* Message Input */}
-        <div className="flex mt-auto">
-          <input
-            type="text"
-            placeholder="Type message..."
-            value={message}
-            onChange={e => setMessage(e.target.value)}
-            className="flex-1 p-2 sm:p-2 border border-gray-300 rounded-l focus:outline-none focus:ring-2 focus:ring-blue-400 text-black text-xs sm:text-base"
-          />
-          <button
-            onClick={sendMessage}
-            className="bg-blue-500 hover:bg-blue-600 text-white px-3 sm:px-4 rounded-r transition duration-200 text-xs sm:text-base"
+          )}
+          {receiverObj && (
+            <div className="flex items-center gap-1 sm:gap-2 mb-1 sm:mb-2">
+              <img src={receiverObj.profileImage || dp} alt="" className="w-6 h-6 sm:w-7 sm:h-7 rounded-full" />
+              <span className="text-xs sm:text-sm text-gray-700 font-semibold">Chatting with {receiverObj.firstName} {receiverObj.lastName}</span>
+            </div>
+          )}
+          <div
+            ref={listRef}
+            onScroll={markReadIfVisible}
+            className="flex-1 overflow-y-auto border border-gray-300 rounded p-1 sm:p-2 mb-2 sm:mb-3 bg-gray-50 scrollbar-hide"
+            style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
           >
-            Send
-          </button>
-        </div>
-        {peerTyping && (
-          <div className="text-xs text-gray-500 mt-1">Typing…</div>
-        )}
-      </div>
-  </div>
-  {/* Incoming call modal */}
-    {incomingCall && (
-      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-        <div className="bg-white rounded-lg p-4 w-80 text-gray-800">
-          <div className="font-semibold mb-2">Incoming {incomingCall.callType === 'video' ? 'Video' : 'Voice'} Call</div>
-          <div className="text-sm mb-4">From: {incomingCall.from === receiverId ? `${receiverObj?.firstName} ${receiverObj?.lastName}` : 'Unknown'}</div>
-          <div className="flex justify-end gap-2">
-            <button className="px-3 py-1 rounded bg-gray-200" onClick={rejectCall}>Reject</button>
-            <button className="px-3 py-1 rounded bg-blue-600 text-white" onClick={acceptCall}>Accept</button>
+            <style>{`.scrollbar-hide::-webkit-scrollbar { display: none; }`}</style>
+            {chat.map((msg, index) => (
+              <div
+                key={index}
+                className={`flex ${msg.incoming ? "justify-start" : "justify-end"} mb-1 sm:mb-2`}
+              >
+                <div className={`max-w-[80%] ${msg.incoming ? "text-left" : "text-right"}`}>
+                  <span
+                    className={`inline-block px-2 sm:px-3 py-1 sm:py-2 rounded-lg text-xs sm:text-sm ${msg.incoming ? "bg-gray-300 text-black" : "bg-blue-500 text-white"}`}
+                  >
+                    {msg.text}
+                  </span>
+                  {!msg.incoming && (
+                    <div className="mt-0.5 text-[10px] text-gray-500">
+                      {msg.status === "read" ? "✔✔ Read" : msg.status === "delivered" ? "✔✔ Delivered" : "✔ Sent"}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
           </div>
-        </div>
-      </div>
-  )}
-  {/* Ongoing call overlay */}
-    {inCall && (
-      <div className="fixed bottom-4 right-4 bg-white rounded-lg shadow-lg p-2 z-40 w-72 text-gray-800">
-        <div className="text-xs font-semibold mb-1">{callType === 'video' ? 'Video' : 'Voice'} call in progress</div>
-        {callType === 'video' ? (
-          <div className="relative w-full aspect-video bg-black rounded overflow-hidden">
-            <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
-            <video ref={localVideoRef} autoPlay muted playsInline className="w-24 h-16 object-cover absolute bottom-1 right-1 border-2 border-white rounded" />
-          </div>
-        ) : (
-          <div className="p-3 text-center text-sm">Connected with {receiverObj?.firstName} {receiverObj?.lastName}</div>
-        )}
-        <div className="flex items-center justify-center gap-3 mt-2">
-          <button onClick={toggleMute} className="p-2 rounded-full bg-gray-100 hover:bg-gray-200" title={muted ? 'Unmute' : 'Mute'}>
-            {muted ? <FiMicOff /> : <FiMic />}
-          </button>
-          {callType === 'video' && (
-            <button onClick={toggleCamera} className="p-2 rounded-full bg-gray-100 hover:bg-gray-200" title={cameraOff ? 'Camera on' : 'Camera off'}>
-              {cameraOff ? <FiCameraOff /> : <FiCamera />}
+          <div className="flex mt-auto">
+            <input
+              type="text"
+              placeholder="Type message..."
+              value={message}
+              onChange={e => setMessage(e.target.value)}
+              className="flex-1 p-2 sm:p-2 border border-gray-300 rounded-l focus:outline-none focus:ring-2 focus:ring-blue-400 text-black text-xs sm:text-base"
+            />
+            <button
+              onClick={sendMessage}
+              className="bg-blue-500 hover:bg-blue-600 text-white px-3 sm:px-4 rounded-r transition duration-200 text-xs sm:text-base"
+            >
+              Send
             </button>
+          </div>
+          {peerTyping && (
+            <div className="text-xs text-gray-500 mt-1">Typing…</div>
           )}
-          <button onClick={() => endCall(true)} className="p-2 rounded-full bg-red-500 text-white hover:bg-red-600" title="End call">
-            <FiPhoneOff />
-          </button>
         </div>
       </div>
-    )}
+
+      <CallWindow
+        incoming={Boolean(incomingCall)}
+        callType={incomingCall?.callType || callType}
+        inCall={inCall}
+        peerName={`${receiverObj?.firstName || ''} ${receiverObj?.lastName || ''}`.trim() || 'Unknown'}
+        peerImage={receiverObj?.profileImage || dp}
+        minimized={minimized}
+        onToggleMinimize={() => setMinimized(v => !v)}
+        onAccept={acceptCall}
+        onReject={rejectCall}
+        onEnd={() => endCall(true)}
+        onMuteToggle={toggleMute}
+        onCamToggle={toggleCamera}
+        muted={muted}
+        cameraOff={cameraOff}
+        localVideoRef={localVideoRef}
+        remoteVideoRef={remoteVideoRef}
+      />
     </>
   );
 }
