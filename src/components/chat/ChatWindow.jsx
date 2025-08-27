@@ -3,7 +3,7 @@
 import React, { useEffect, useState, useContext, useRef } from "react";
 import { userDataContext } from "../../context/UserContext";
 import { authDataContext } from "../../context/AuthContext";
-import { io } from "socket.io-client";
+// socket is provided by UserContext
 import { useConnections } from "../../hooks/useConnections";
 import dp from "../../assets/dp.webp";
 import axios from "axios";
@@ -22,7 +22,7 @@ function ChatBox() {
   const [isTyping, setIsTyping] = useState(false);
   const [peerTyping, setPeerTyping] = useState(false);
   const connections = useConnections();
-  const socketRef = useRef(null);
+  const { socket } = useContext(userDataContext);
 
   // WebRTC state
   const pcRef = useRef(null);
@@ -33,18 +33,14 @@ function ChatBox() {
   const [inCall, setInCall] = useState(false);
   const [callType, setCallType] = useState(null); // 'audio' | 'video'
   const [incomingCall, setIncomingCall] = useState(null); // { from, offer, callType }
+  const [callPeerId, setCallPeerId] = useState(null);
   const [muted, setMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
+  const [callError, setCallError] = useState("");
 
   // Fetch chat history when receiverId changes
   useEffect(() => {
-    if (!userData?._id || !serverUrl) return;
-    // initialize socket once
-    if (!socketRef.current) {
-      socketRef.current = io(serverUrl, { withCredentials: true });
-      socketRef.current.emit("register", userData._id);
-    }
-    const socket = socketRef.current;
+    if (!userData?._id || !socket) return;
     const onReceive = (data) => {
       setChat((prev) => [
         ...prev,
@@ -121,7 +117,7 @@ function ChatBox() {
       socket.off("call_rejected", onCallRejected);
       socket.off("call_unavailable", onCallUnavailable);
     };
-  }, [userData, serverUrl, receiverId]);
+  }, [userData, socket, receiverId]);
 
   useEffect(() => {
     const fetchHistory = async () => {
@@ -152,7 +148,7 @@ function ChatBox() {
 
   const markRead = () => {
     if (!userData?._id || !receiverId) return;
-    socketRef.current?.emit("mark_read", { from: receiverId, to: userData._id });
+  socket?.emit("mark_read", { from: receiverId, to: userData._id });
   };
 
   const markReadIfVisible = () => {
@@ -169,7 +165,7 @@ function ChatBox() {
       ...prev,
       { senderId: userData._id, text: message, incoming: false, clientId: cid, status: "sent" },
     ]);
-    socketRef.current?.emit("send_message", {
+  socket?.emit("send_message", {
       senderId: userData._id,
       receiverId,
       text: message,
@@ -177,7 +173,7 @@ function ChatBox() {
     });
     setMessage("");
     // Inform peer not typing
-    socketRef.current?.emit("typing", { from: userData._id, to: receiverId, isTyping: false });
+  socket?.emit("typing", { from: userData._id, to: receiverId, isTyping: false });
   };
 
   // typing events
@@ -185,19 +181,19 @@ function ChatBox() {
     if (!userData?._id || !receiverId) return;
     if (message && !isTyping) {
       setIsTyping(true);
-      socketRef.current?.emit("typing", { from: userData._id, to: receiverId, isTyping: true });
+  socket?.emit("typing", { from: userData._id, to: receiverId, isTyping: true });
     }
     const t = setTimeout(() => {
       if (isTyping) {
         setIsTyping(false);
-        socketRef.current?.emit("typing", { from: userData._id, to: receiverId, isTyping: false });
+  socket?.emit("typing", { from: userData._id, to: receiverId, isTyping: false });
       }
     }, 800);
     return () => clearTimeout(t);
   }, [message, userData, receiverId]);
 
   // Helper: create peer connection
-  const createPeerConnection = () => {
+  const createPeerConnection = (targetId) => {
     const pc = new RTCPeerConnection({
       iceServers: [
         { urls: "stun:stun.l.google.com:19302" },
@@ -205,8 +201,8 @@ function ChatBox() {
       ]
     });
     pc.onicecandidate = (e) => {
-      if (e.candidate && receiverId) {
-        socketRef.current?.emit("ice_candidate", { to: receiverId, from: userData._id, candidate: e.candidate });
+      if (e.candidate && targetId) {
+        socket?.emit("ice_candidate", { to: targetId, from: userData._id, candidate: e.candidate });
       }
     };
     pc.ontrack = (e) => {
@@ -221,27 +217,54 @@ function ChatBox() {
     return pc;
   };
 
+  const ensureSocketReady = async () => {
+    if (!socket) throw new Error("Socket not available");
+    if (socket.connected) return;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    if (!socket.connected) throw new Error("Socket not connected");
+  };
+
   const getMedia = async (type) => {
-    const constraints = type === 'video' ? { video: true, audio: true } : { audio: true };
-    const stream = await navigator.mediaDevices.getUserMedia(constraints);
-    localStreamRef.current = stream;
-    if (localVideoRef.current) localVideoRef.current.srcObject = stream;
-    return stream;
+    if (!navigator?.mediaDevices?.getUserMedia) {
+      throw new Error("Media devices not supported in this browser");
+    }
+    const constraintsVideo = { video: { facingMode: "user" }, audio: true };
+    const constraintsAudio = { audio: { echoCancellation: true } };
+    try {
+      const constraints = type === 'video' ? constraintsVideo : constraintsAudio;
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      localStreamRef.current = stream;
+      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+      return stream;
+    } catch (e) {
+      if (type === 'video') {
+        // Fallback to audio-only if video fails
+        const stream = await navigator.mediaDevices.getUserMedia(constraintsAudio);
+        localStreamRef.current = stream;
+        if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+        return stream;
+      }
+      throw e;
+    }
   };
 
   const startCall = async (type) => {
     if (!receiverId || !userData?._id) return;
     try {
+  setCallError("");
+  await ensureSocketReady();
       setCallType(type);
+  setCallPeerId(receiverId);
       const stream = await getMedia(type);
-      const pc = createPeerConnection();
+  const pc = createPeerConnection(receiverId);
       pcRef.current = pc;
       stream.getTracks().forEach(track => pc.addTrack(track, stream));
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      socketRef.current?.emit("call_user", { to: receiverId, from: userData._id, offer, callType: type });
+  socket?.emit("call_user", { to: receiverId, from: userData._id, offer, callType: type });
     } catch (e) {
-      alert("Unable to start call");
+  console.error("startCall error", e);
+  setCallError(e?.message || "Unable to start call");
       cleanupCall();
     }
   };
@@ -251,38 +274,41 @@ function ChatBox() {
     const { from, offer, callType: t } = incomingCall;
     try {
       setCallType(t);
+  setCallPeerId(from);
       const stream = await getMedia(t);
-      const pc = createPeerConnection();
+  const pc = createPeerConnection(from);
       pcRef.current = pc;
       stream.getTracks().forEach(track => pc.addTrack(track, stream));
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      socketRef.current?.emit("answer_call", { to: from, from: userData._id, answer });
+  socket?.emit("answer_call", { to: from, from: userData._id, answer });
       setInCall(true);
       setIncomingCall(null);
     } catch (e) {
-      alert("Failed to accept call");
+  console.error("acceptCall error", e);
+  setCallError(e?.message || "Failed to accept call");
       cleanupCall();
     }
   };
 
   const rejectCall = () => {
     if (!incomingCall) return;
-    socketRef.current?.emit("reject_call", { to: incomingCall.from, from: userData._id });
+  socket?.emit("reject_call", { to: incomingCall.from, from: userData._id });
     setIncomingCall(null);
     cleanupCall();
   };
 
   const endCall = (notifyPeer = true) => {
     try {
-      if (notifyPeer && receiverId) {
-        socketRef.current?.emit("end_call", { to: receiverId, from: userData._id });
+      if (notifyPeer && callPeerId) {
+        socket?.emit("end_call", { to: callPeerId, from: userData._id });
       }
     } catch {}
     cleanupCall();
     setInCall(false);
     setCallType(null);
+    setCallPeerId(null);
   };
 
   const cleanupCall = () => {
@@ -360,6 +386,9 @@ function ChatBox() {
             <span className="text-lg font-semibold text-gray-800">Real-Time Chat</span>
           )}
         </div>
+        {callError && (
+          <div className="mb-2 text-xs text-red-600">{callError}</div>
+        )}
         {/* Connection Suggestions */}
         {connections.length > 0 && (
           <div className="mb-2 sm:mb-3">

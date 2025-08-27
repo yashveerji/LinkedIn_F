@@ -113,6 +113,14 @@ useEffect(() => {
 // eslint-disable-next-line react-hooks/exhaustive-deps
 }, [serverUrl, userData?._id]);
 
+// If socket exists but userId becomes available later, register then
+useEffect(() => {
+  const sock = socketRef.current?.socket;
+  if (sock && userData?._id) {
+    try { sock.emit('register', userData._id); } catch {}
+  }
+}, [userData?._id]);
+
 
   const value={
     userData,
