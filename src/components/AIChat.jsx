@@ -1,8 +1,10 @@
 // components/AIChat.js
-import React, { useState } from "react";
+import React, { useContext, useState } from "react";
 import axios from "axios";
+import { authDataContext } from "../context/AuthContext";
 
 function AIChat() {
+  const { serverUrl } = useContext(authDataContext);
   const [messages, setMessages] = useState([
     { from: "ai", text: "Hi! I’m your Global Connect assistant. How can I help you today?" },
   ]);
@@ -18,7 +20,7 @@ function AIChat() {
     setLoading(true);
 
     try {
-      const res = await axios.post("http://localhost:8000/api/ai/get-res", { code: input });
+      const res = await axios.post(`${serverUrl}/api/ai/get-res`, { code: input }, { withCredentials: true });
       const aiText = res.data?.reply || "Sorry, I couldn’t respond.";
       setMessages((prev) => [...prev, { from: "ai", text: aiText }]);
     } catch (error) {

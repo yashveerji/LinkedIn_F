@@ -1,11 +1,13 @@
 import React, { useEffect, useState, useContext } from "react";
 import { userDataContext } from "../context/UserContext";
+import { authDataContext } from "../context/AuthContext";
 import axios from "axios";
 import Nav from "../components/Nav";
 
 
 function Jobs() {
   const { userData } = useContext(userDataContext);
+  const { serverUrl } = useContext(authDataContext);
   const [jobs, setJobs] = useState([]);
   const [title, setTitle] = useState("");
   const [company, setCompany] = useState("");
@@ -23,7 +25,7 @@ function Jobs() {
   // Fetch jobs
   const fetchJobs = async () => {
     try {
-      const res = await axios.get("http://localhost:8000/api/jobs");
+      const res = await axios.get(`${serverUrl}/api/jobs`, { withCredentials: true });
       setJobs(res.data);
     } catch (error) {
       console.error(error.response ? error.response.data : error.message);
@@ -39,14 +41,14 @@ function Jobs() {
     }
     try {
       if (isEditMode && selectedJob) {
-        await axios.put(`http://localhost:8000/api/jobs/edit/${selectedJob._id}`, {
+        await axios.put(`${serverUrl}/api/jobs/edit/${selectedJob._id}`, {
           title,
           company,
           description,
           location,
         }, { withCredentials: true });
       } else {
-        await axios.post("http://localhost:8000/api/jobs/add", {
+        await axios.post(`${serverUrl}/api/jobs/add`, {
           title,
           company,
           description,

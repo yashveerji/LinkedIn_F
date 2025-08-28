@@ -1,15 +1,12 @@
 import React, { useContext, useEffect, useState } from 'react'
 import { authDataContext } from '../context/AuthContext'
 import axios from 'axios'
-import io from "socket.io-client"
 import { userDataContext } from '../context/UserContext'
 import { useNavigate } from 'react-router-dom'
 
-const socket = io("http://localhost:8000")
-
 function ConnectionButton({ userId }) {
     const { serverUrl } = useContext(authDataContext)
-    const { userData } = useContext(userDataContext)
+    const { userData, socket } = useContext(userDataContext)
     const [status, setStatus] = useState("")
     const navigate = useNavigate()
 
@@ -52,19 +49,19 @@ function ConnectionButton({ userId }) {
     }
 
     useEffect(() => {
-        socket.emit("register", userData._id)
         handleGetStatus()
-
-        socket.on("statusUpdate", ({ updatedUserId, newStatus }) => {
-            if (updatedUserId === userId) {
-                setStatus(newStatus)
-            }
-        })
-
-        return () => {
-            socket.off("statusUpdate")
+        if (!socket) return;
+        if (userData?._id) {
+            try { socket.emit("register", userData._id) } catch {}
         }
-    }, [userId])
+        const onStatus = ({ updatedUserId, newStatus }) => {
+            if (updatedUserId === userId) setStatus(newStatus)
+        }
+        socket.on("statusUpdate", onStatus)
+        return () => {
+            try { socket.off("statusUpdate", onStatus) } catch {}
+        }
+    }, [userId, userData?._id, socket])
 
     const handleClick = async () => {
         if (status === "disconnect") {

@@ -1,14 +1,16 @@
-import React, { useState } from "react";
+import React, { useState, useContext } from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
+import { authDataContext } from "../context/AuthContext";
 
 export default function JobForm() {
   const [form, setForm] = useState({ title: "", company: "", location: "", type: "", description: "", salaryRange: "" });
   const navigate = useNavigate();
+  const { serverUrl } = useContext(authDataContext);
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    axios.post("/api/jobs", form).then(() => {
+    axios.post(`${serverUrl}/api/jobs`, form, { withCredentials: true }).then(() => {
       alert("Job posted successfully");
       navigate("/jobs");
     });
