@@ -18,7 +18,8 @@ const CallWindow = ({
   muted = false,
   cameraOff = false,
   localVideoRef,
-  remoteVideoRef
+  remoteVideoRef,
+  remoteAudioRef
 }) => {
   if (incoming) {
     return (
@@ -50,7 +51,7 @@ const CallWindow = ({
           {minimized ? <FiMaximize2 /> : <FiMinimize2 />}
         </button>
       </div>
-      {callType === 'video' && !minimized ? (
+    {callType === 'video' && !minimized ? (
         <div className="relative w-full aspect-video bg-black rounded overflow-hidden">
           <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
           <video ref={localVideoRef} autoPlay muted playsInline className="w-24 h-16 object-cover absolute bottom-1 right-1 border-2 border-white rounded" />
@@ -59,6 +60,8 @@ const CallWindow = ({
         <div className="flex items-center gap-3 p-3">
           <img src={peerImage} alt="" className="w-10 h-10 rounded-full border" />
           <div className="text-sm">Connected</div>
+      {/* Hidden audio element to play remote audio on audio-only calls */}
+      <audio ref={remoteAudioRef} autoPlay />
         </div>
       )}
       <div className="flex items-center justify-center gap-3 mt-2">

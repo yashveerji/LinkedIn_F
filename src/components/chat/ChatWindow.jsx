@@ -25,6 +25,7 @@ function ChatBox() {
   const pcRef = useRef(null);
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
+  const remoteAudioRef = useRef(null);
   const localStreamRef = useRef(null);
   const remoteStreamRef = useRef(null);
   const [inCall, setInCall] = useState(false);
@@ -88,6 +89,12 @@ function ChatBox() {
       setCallError("Call rejected");
       cleanupCall();
     };
+    const onCallUnavailable = () => {
+      setIncomingCall(null);
+      setInCall(false);
+      setCallError("User is unavailable");
+      cleanupCall();
+    };
 
     socket.on("receive_message", onReceive);
     socket.on("message_status", onStatus);
@@ -99,6 +106,7 @@ function ChatBox() {
     socket.on("ice_candidate", onIceCandidate);
     socket.on("call_ended", onCallEnded);
     socket.on("call_rejected", onCallRejected);
+  socket.on("call_unavailable", onCallUnavailable);
 
     return () => {
       socket.off("receive_message", onReceive);
@@ -111,6 +119,7 @@ function ChatBox() {
       socket.off("ice_candidate", onIceCandidate);
       socket.off("call_ended", onCallEnded);
       socket.off("call_rejected", onCallRejected);
+  socket.off("call_unavailable", onCallUnavailable);
     };
   }, [socket, userData?._id, receiverId]);
 
@@ -212,12 +221,28 @@ function ChatBox() {
       }
     };
     pc.ontrack = (e) => {
-      if (!remoteStreamRef.current) {
-        remoteStreamRef.current = new MediaStream();
-      }
-      e.streams[0]?.getTracks().forEach(t => remoteStreamRef.current.addTrack(t));
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = e.streams[0];
+      const stream = e.streams && e.streams[0] ? e.streams[0] : null;
+      if (stream) {
+        if (!remoteStreamRef.current) {
+          remoteStreamRef.current = new MediaStream();
+        }
+        // ensure all tracks are present
+        stream.getTracks().forEach(t => {
+          try { remoteStreamRef.current.addTrack(t); } catch {}
+        });
+        if (remoteVideoRef.current) {
+          try {
+            remoteVideoRef.current.srcObject = stream;
+            const p = remoteVideoRef.current.play?.();
+            if (p && typeof p.then === 'function') p.catch(() => {});
+          } catch {}
+        } else if (remoteAudioRef.current) {
+          try {
+            remoteAudioRef.current.srcObject = stream;
+            const p = remoteAudioRef.current.play?.();
+            if (p && typeof p.then === 'function') p.catch(() => {});
+          } catch {}
+        }
       }
     };
     return pc;
@@ -234,21 +259,36 @@ function ChatBox() {
     if (!navigator?.mediaDevices?.getUserMedia) {
       throw new Error("Media devices not supported in this browser");
     }
-    const constraintsVideo = { video: { facingMode: "user" }, audio: true };
-    const constraintsAudio = { audio: { echoCancellation: true } };
+    const constraintsVideo = {
+      video: { facingMode: { ideal: "user" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    };
+    const constraintsAudio = { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
     try {
       const constraints = type === 'video' ? constraintsVideo : constraintsAudio;
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       localStreamRef.current = stream;
-      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+      if (localVideoRef.current) {
+        try {
+          localVideoRef.current.srcObject = stream;
+          const p = localVideoRef.current.play?.();
+          if (p && typeof p.then === 'function') p.catch(() => {});
+        } catch {}
+      }
       return stream;
     } catch (e) {
       if (type === 'video') {
-        // Fallback to audio-only if video fails
-        const stream = await navigator.mediaDevices.getUserMedia(constraintsAudio);
-        localStreamRef.current = stream;
-        if (localVideoRef.current) localVideoRef.current.srcObject = stream;
-        return stream;
+        // Fallback to audio-only if video fails (permissions or no camera)
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia(constraintsAudio);
+          localStreamRef.current = stream;
+          if (localVideoRef.current) {
+            try { localVideoRef.current.srcObject = stream; } catch {}
+          }
+          return stream;
+        } catch (err) {
+          throw e;
+        }
       }
       throw e;
     }
@@ -264,7 +304,9 @@ function ChatBox() {
       const stream = await getMedia(type);
       const pc = createPeerConnection(receiverId);
       pcRef.current = pc;
-      stream.getTracks().forEach(track => pc.addTrack(track, stream));
+      stream.getTracks().forEach(track => {
+        try { pc.addTrack(track, stream); } catch {}
+      });
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       socket?.emit("call_user", { to: receiverId, from: userData._id, offer, callType: type });
@@ -284,7 +326,9 @@ function ChatBox() {
       const stream = await getMedia(t);
       const pc = createPeerConnection(from);
       pcRef.current = pc;
-      stream.getTracks().forEach(track => pc.addTrack(track, stream));
+      stream.getTracks().forEach(track => {
+        try { pc.addTrack(track, stream); } catch {}
+      });
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
@@ -326,8 +370,9 @@ function ChatBox() {
     localStreamRef.current?.getTracks()?.forEach(t => t.stop());
     localStreamRef.current = null;
     remoteStreamRef.current = null;
-    if (localVideoRef.current) localVideoRef.current.srcObject = null;
-    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+  if (localVideoRef.current) localVideoRef.current.srcObject = null;
+  if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+  if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
     setMuted(false);
     setCameraOff(false);
   };
@@ -483,7 +528,8 @@ function ChatBox() {
         muted={muted}
         cameraOff={cameraOff}
         localVideoRef={localVideoRef}
-        remoteVideoRef={remoteVideoRef}
+  remoteVideoRef={remoteVideoRef}
+  remoteAudioRef={remoteAudioRef}
       />
     </>
   );
