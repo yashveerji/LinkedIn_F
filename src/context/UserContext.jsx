@@ -15,7 +15,10 @@ let navigate=useNavigate()
 const socketRef = useRef(null)
 const getCurrentUser=async ()=>{
     try {
-        let result=await axios.get(serverUrl+"/api/user/currentuser",{withCredentials:true})
+        const cacheBust = `&_=${Date.now()}`;
+        let result=await axios.get(`${serverUrl}/api/user/currentuser?__nocache=1${cacheBust}`,
+          { withCredentials:true, headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' } }
+        )
         setUserData(result.data)
         return
     } catch (error) {
@@ -52,9 +55,23 @@ const handleGetProfile=async (userName)=>{
 
 
 useEffect(() => {
-getCurrentUser();
- getPost()
-}, []);
+  getCurrentUser();
+  getPost();
+  // re-run if backend base URL changes
+}, [serverUrl]);
+
+// When the logged-in user identity changes, clear stale views and refetch
+useEffect(() => {
+  // Clear profile page data so it doesn't show previous account
+  setProfileData([]);
+  // Optionally refresh posts for the new user context
+  if (userData?._id) {
+    getPost();
+  } else {
+    setPostData([]);
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [userData?._id]);
 
 // App-wide realtime feed updates
 useEffect(() => {
