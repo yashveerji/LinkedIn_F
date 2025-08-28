@@ -5,39 +5,37 @@ import { authDataContext } from "../context/AuthContext";
 import dp from "../assets/dp.webp";
 import { IoIosCheckmarkCircleOutline } from "react-icons/io";
 import { RxCrossCircled } from "react-icons/rx";
-// use the shared app-wide socket from UserContext
+import io from "socket.io-client";
 
 import { useNavigate } from "react-router-dom";
 
 function Network() {
   const { serverUrl } = useContext(authDataContext);
-  const { socket, userData } = useContext(require("../context/UserContext").userDataContext);
 
   const navigate = useNavigate();
 
   const [requests, setRequests] = useState([]);
   const [connections, setConnections] = useState([]);
 
-  // Socket setup (reuse global socket)
+  // Socket setup
   useEffect(() => {
-    if (!socket) return;
-    if (userData?._id) {
-      try { socket.emit("register", userData._id); } catch {}
-    }
-    const onNewRequest = (newReq) => setRequests((prev) => [...prev, newReq]);
-    const onAccepted = () => { fetchConnections(); fetchRequests(); };
-    const onRemoved = (id) => setConnections((prev) => prev.filter((c) => c._id !== id));
-    socket.on("newRequest", onNewRequest);
-    socket.on("requestAccepted", onAccepted);
-    socket.on("connectionRemoved", onRemoved);
-    return () => {
-      try {
-        socket.off("newRequest", onNewRequest);
-        socket.off("requestAccepted", onAccepted);
-        socket.off("connectionRemoved", onRemoved);
-      } catch {}
-    };
-  }, [socket, userData?._id]);
+    const socket = io(serverUrl, { withCredentials: true });
+
+    socket.on("newRequest", (newReq) => {
+      setRequests((prev) => [...prev, newReq]);
+    });
+
+    socket.on("requestAccepted", () => {
+      fetchConnections();
+      fetchRequests();
+    });
+
+    socket.on("connectionRemoved", (id) => {
+      setConnections((prev) => prev.filter((c) => c._id !== id));
+    });
+
+    return () => socket.disconnect();
+  }, [serverUrl]);
 
   // Fetch pending requests
   const fetchRequests = async () => {
