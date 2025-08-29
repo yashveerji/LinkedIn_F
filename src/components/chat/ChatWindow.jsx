@@ -215,34 +215,35 @@ function ChatBox() {
       iceServers.push({ urls: turnUrls.split(","), username: turnUser, credential: turnCred });
     }
     const pc = new RTCPeerConnection({ iceServers });
+    // Surface ICE state changes for debugging
+    pc.oniceconnectionstatechange = () => {
+      try { console.debug('ICE state:', pc.iceConnectionState); } catch {}
+    };
+    pc.onconnectionstatechange = () => {
+      try { console.debug('PC state:', pc.connectionState); } catch {}
+    };
     pc.onicecandidate = (e) => {
       if (e.candidate && targetId) {
         socket?.emit("ice_candidate", { to: targetId, from: userData._id, candidate: e.candidate });
       }
     };
     pc.ontrack = (e) => {
-      const stream = e.streams && e.streams[0] ? e.streams[0] : null;
-      if (stream) {
-        if (!remoteStreamRef.current) {
-          remoteStreamRef.current = new MediaStream();
-        }
-        // ensure all tracks are present
-        stream.getTracks().forEach(t => {
-          try { remoteStreamRef.current.addTrack(t); } catch {}
-        });
-        if (remoteVideoRef.current) {
-          try {
-            remoteVideoRef.current.srcObject = stream;
-            const p = remoteVideoRef.current.play?.();
-            if (p && typeof p.then === 'function') p.catch(() => {});
-          } catch {}
-        } else if (remoteAudioRef.current) {
-          try {
-            remoteAudioRef.current.srcObject = stream;
-            const p = remoteAudioRef.current.play?.();
-            if (p && typeof p.then === 'function') p.catch(() => {});
-          } catch {}
-        }
+      const stream = e.streams?.[0];
+      if (!stream) return;
+      // Attach to both video and audio elements to maximize autoplay success
+      if (remoteVideoRef.current) {
+        try {
+          remoteVideoRef.current.srcObject = stream;
+          const p = remoteVideoRef.current.play?.();
+          if (p && typeof p.then === 'function') p.catch(() => {});
+        } catch {}
+      }
+      if (remoteAudioRef.current) {
+        try {
+          remoteAudioRef.current.srcObject = stream;
+          const p = remoteAudioRef.current.play?.();
+          if (p && typeof p.then === 'function') p.catch(() => {});
+        } catch {}
       }
     };
     return pc;
@@ -277,7 +278,7 @@ function ChatBox() {
       }
       return stream;
     } catch (e) {
-      if (type === 'video') {
+  if (type === 'video') {
         // Fallback to audio-only if video fails (permissions or no camera)
         try {
           const stream = await navigator.mediaDevices.getUserMedia(constraintsAudio);
@@ -301,7 +302,8 @@ function ChatBox() {
       await ensureSocketReady();
       setCallType(type);
       setCallPeerId(receiverId);
-      const stream = await getMedia(type);
+  const stream = await getMedia(type);
+  if (!stream) throw new Error('Could not acquire media');
       const pc = createPeerConnection(receiverId);
       pcRef.current = pc;
       stream.getTracks().forEach(track => {
